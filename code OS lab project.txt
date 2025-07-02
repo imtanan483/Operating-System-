@@ -1,0 +1,284 @@
+// [Unchanged headers and includes]
+#include <iostream>
+#include <vector>
+#include <queue>
+#include <thread>
+#include <chrono>
+#include <mutex>
+#include <random>
+#include <map>
+#include <iomanip>
+#include <algorithm>
+
+using namespace std;
+
+mutex mtx;
+
+struct Process {
+    int pid;
+    int burstTime;
+    int remainingTime;
+    int priority;
+    int completionTime;
+    int startTime;
+    int waitingTime;
+    int turnaroundTime;
+    bool started;
+    bool finished;
+    bool terminated; // for deadlock recovery
+
+    Process(int id, int bt, int prio)
+        : pid(id), burstTime(bt), remainingTime(bt), priority(prio),
+          completionTime(0), startTime(-1), waitingTime(0), turnaroundTime(0),
+          started(false), finished(false), terminated(false) {}
+};
+
+// === IPC Manager Module ===
+class IPCManager {
+    // [Same as your original implementation]
+    map<int, vector<string>> messageQueue;
+    mutex ipcMutex;
+
+public:
+    void send(int fromPID, int toPID, const string& msg) {
+        lock_guard<mutex> lock(ipcMutex);
+        string formatted = "From Process " + to_string(fromPID) + ": " + msg;
+        messageQueue[toPID].push_back(formatted);
+        cout << "[IPC] Message sent from " << fromPID << " to " << toPID << endl;
+    }
+
+    void receive(int pid) {
+        lock_guard<mutex> lock(ipcMutex);
+        if (messageQueue.find(pid) != messageQueue.end() && !messageQueue[pid].empty()) {
+            cout << "[IPC] Process " << pid << " received messages:\n";
+            for (const auto& msg : messageQueue[pid]) {
+                cout << "   " << msg << endl;
+            }
+            messageQueue[pid].clear();
+        } else {
+            cout << "[IPC] No new messages for Process " << pid << endl;
+        }
+    }
+
+    void showAllMessages() {
+        lock_guard<mutex> lock(ipcMutex);
+        cout << "[IPC] Current Message Queue:\n";
+        for (const auto& entry : messageQueue) {
+            cout << "  Process " << entry.first << " has " << entry.second.size() << " message(s)\n";
+        }
+    }
+};
+
+// === Global Variables ===
+vector<Process> processList;
+int timeQuantum = 3;
+int timeElapsed = 0;
+
+// === CPU Scheduling ===
+void hybridScheduling() {
+    while (true) {
+        bool allFinished = true;
+
+        for (auto& proc : processList) {
+            if (!proc.finished && !proc.terminated) {
+                allFinished = false;
+
+                if (!proc.started) {
+                    proc.started = true;
+                    proc.startTime = timeElapsed;
+                }
+
+                int timeToRun = min(proc.remainingTime, timeQuantum);
+                cout << "[Scheduler] Running Process " << proc.pid << " for " << timeToRun << " units" << endl;
+                this_thread::sleep_for(chrono::milliseconds(200));
+
+                proc.remainingTime -= timeToRun;
+                timeElapsed += timeToRun;
+
+                if (proc.remainingTime <= 0) {
+                    proc.finished = true;
+                    proc.completionTime = timeElapsed;
+                    proc.turnaroundTime = proc.completionTime;
+                    proc.waitingTime = proc.turnaroundTime - proc.burstTime;
+                    cout << "[Scheduler] Process " << proc.pid << " completed." << endl;
+                } else {
+                    proc.priority = max(0, proc.priority - 1);
+                }
+            }
+        }
+
+        if (allFinished) break;
+    }
+
+    cout << "[System] All processes have completed. Total time elapsed: " << timeElapsed << " units\n";
+}
+
+// === Performance Analysis ===
+void analyzePerformance() {
+    double totalWaiting = 0, totalTurnaround = 0;
+    int counted = 0;
+
+    cout << "\n[Analysis] System Performance Report:\n";
+    cout << left << setw(10) << "PID" << setw(15) << "Burst Time" << setw(15)
+         << "Waiting Time" << setw(18) << "Turnaround Time" << "\n";
+
+    for (const auto& proc : processList) {
+        if (proc.terminated) {
+            cout << left << setw(10) << proc.pid << setw(15) << proc.burstTime
+                 << setw(15) << "Terminated" << setw(18) << "Terminated" << "\n";
+            continue;
+        }
+        cout << left << setw(10) << proc.pid << setw(15) << proc.burstTime
+             << setw(15) << proc.waitingTime << setw(18) << proc.turnaroundTime << "\n";
+        totalWaiting += proc.waitingTime;
+        totalTurnaround += proc.turnaroundTime;
+        counted++;
+    }
+
+    double avgWT = totalWaiting / counted;
+    double avgTAT = totalTurnaround / counted;
+    double throughput = (double)counted / timeElapsed;
+    double cpuUtil = 100.0;
+
+    cout << fixed << setprecision(2);
+    cout << "\nAverage Waiting Time: " << avgWT << " units\n";
+    cout << "Average Turnaround Time: " << avgTAT << " units\n";
+    cout << "CPU Utilization: " << cpuUtil << " %\n";
+    cout << "Throughput: " << throughput << " processes/unit time\n";
+}
+
+// === Deadlock Detection ===
+bool detectDeadlock(vector<vector<int>>& allocation, vector<vector<int>>& maxNeed, vector<int>& available) {
+    int n = allocation.size();
+    int m = available.size();
+
+    vector<bool> finish(n, false);
+    vector<int> work = available;
+
+    while (true) {
+        bool progress = false;
+        for (int i = 0; i < n; ++i) {
+            if (!finish[i]) {
+                bool canProceed = true;
+                for (int j = 0; j < m; ++j) {
+                    if (maxNeed[i][j] - allocation[i][j] > work[j]) {
+                        canProceed = false;
+                        break;
+                    }
+                }
+                if (canProceed) {
+                    for (int j = 0; j < m; ++j)
+                        work[j] += allocation[i][j];
+                    finish[i] = true;
+                    progress = true;
+                }
+            }
+        }
+        if (!progress) break;
+    }
+
+    for (bool f : finish)
+        if (!f) return true;
+    return false;
+}
+
+// === Deadlock Recovery ===
+void recoverFromDeadlock(vector<vector<int>>& allocation, vector<vector<int>>& maxNeed, vector<int>& available) {
+    cout << "[Recovery] Initiating deadlock recovery...\n";
+    while (detectDeadlock(allocation, maxNeed, available)) {
+        // Select a process to terminate (with highest total allocation)
+        int maxAlloc = -1, victim = -1;
+        for (int i = 0; i < allocation.size(); ++i) {
+            int total = 0;
+            for (int res : allocation[i]) total += res;
+            if (total > maxAlloc) {
+                maxAlloc = total;
+                victim = i;
+            }
+        }
+
+        if (victim == -1) break;
+
+        cout << "[Recovery] Terminating Process " << processList[victim].pid << " to resolve deadlock.\n";
+        processList[victim].terminated = true;
+
+        // Release its resources
+        for (int j = 0; j < available.size(); ++j)
+            available[j] += allocation[victim][j];
+
+        // Clear its allocation and max need
+        fill(allocation[victim].begin(), allocation[victim].end(), 0);
+        fill(maxNeed[victim].begin(), maxNeed[victim].end(), 0);
+    }
+    cout << "[Recovery] Deadlock resolved. System in safe state.\n";
+}
+
+// === Main ===
+int main() {
+    cout << "=== Operating System Simulation ===\n";
+
+    // === Process Input ===
+    int numProcesses;
+    cout << "Enter number of processes: ";
+    cin >> numProcesses;
+
+    for (int i = 0; i < numProcesses; ++i) {
+        int bt, prio;
+        cout << "Enter burst time and priority for Process " << (i + 1) << ": ";
+        cin >> bt >> prio;
+        processList.push_back(Process(i + 1, bt, prio));
+    }
+
+    // === Deadlock Simulation Input ===
+    int resourceTypes;
+    cout << "\nEnter number of resource types: ";
+    cin >> resourceTypes;
+
+    vector<vector<int>> allocation(numProcesses, vector<int>(resourceTypes));
+    vector<vector<int>> maxNeed(numProcesses, vector<int>(resourceTypes));
+    vector<int> available(resourceTypes);
+
+    cout << "\nEnter Allocation Matrix:\n";
+    for (int i = 0; i < numProcesses; ++i)
+        for (int j = 0; j < resourceTypes; ++j)
+            cin >> allocation[i][j];
+
+    cout << "Enter Maximum Need Matrix:\n";
+    for (int i = 0; i < numProcesses; ++i)
+        for (int j = 0; j < resourceTypes; ++j)
+            cin >> maxNeed[i][j];
+
+    cout << "Enter Available Resources:\n";
+    for (int j = 0; j < resourceTypes; ++j)
+        cin >> available[j];
+
+    if (detectDeadlock(allocation, maxNeed, available)) {
+        cout << "[Deadlock] Deadlock detected! System in unsafe state.\n";
+        recoverFromDeadlock(allocation, maxNeed, available);
+    } else {
+        cout << "[Deadlock] No deadlock. Safe to proceed.\n";
+    }
+
+    // === IPC Module ===
+    IPCManager ipc;
+    int from, to;
+    string msg;
+    cout << "\n[IPC] Enter sender PID, receiver PID and message:\n";
+    cin >> from >> to;
+    cin.ignore(); // clear newline
+    getline(cin, msg);
+
+    ipc.send(from, to, msg);
+    ipc.receive(to);
+
+    // === CPU Scheduling Simulation ===
+    cout << "\n[Scheduler] Starting CPU Scheduling...\n";
+    hybridScheduling();
+
+    // === Performance Analysis ===
+    analyzePerformance();
+
+    return 0;
+}
+
+
